@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+download/
+*.ini
+*.json
+.history/
+.vscode/
+tidal-dl-fixed
+GEMINI.md
