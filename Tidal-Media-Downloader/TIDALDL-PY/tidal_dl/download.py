@@ -158,9 +158,9 @@ def downloadTrack(track: Track, album=None, playlist=None, userProgress=None, pa
         #     return False, 'Skipped: Not WAV'
         
         # STRICT HIFI/MASTER CHECK
-        if stream.soundQuality not in ['LOSSLESS', 'HI_RES', 'HI_RES_LOSSLESS']:
-            Printf.err(f"Skipping '{track.title}': Quality is '{stream.soundQuality}', not HiFi/Master.")
-            return False, f"Skipped: Quality is {stream.soundQuality}, not HiFi/Master"
+        if stream.soundQuality not in ['HIGH', 'LOSSLESS', 'HI_RES', 'HI_RES_LOSSLESS']:
+            Printf.err(f"Skipping '{track.title}': Quality is '{stream.soundQuality}', not High/HiFi/Master.")
+            return False, f"Skipped: Quality is {stream.soundQuality}, not High/HiFi/Master"
 
         if SETTINGS.showTrackInfo and not SETTINGS.multiThread:
             Printf.track(track, stream)
@@ -212,12 +212,15 @@ def downloadTrack(track: Track, album=None, playlist=None, userProgress=None, pa
             codec_result = subprocess.run(probe_cmd, capture_output=True, text=True, check=True)
             actual_codec = codec_result.stdout.strip().lower()
 
-            if actual_codec == 'aac':
+            if actual_codec == 'aac' and stream.soundQuality != 'HIGH':
                 Printf.err(f"Skipped: Actual content is AAC (Lossy) despite metadata promises. File deleted.")
                 os.remove(path)
                 return False, 'Skipped: Fake FLAC (AAC detected)'
             
-            Printf.success(f"Verified Lossless Codec: {actual_codec}")
+            if actual_codec == 'aac':
+                Printf.success(f"Accepted Lossy Codec (Quality is HIGH): {actual_codec}")
+            else:
+                Printf.success(f"Verified Lossless Codec: {actual_codec}")
 
         except Exception as e:
             Printf.err(f"Warning: Could not verify codec with ffprobe (proceeding anyway): {e}")

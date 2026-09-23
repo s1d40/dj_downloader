@@ -100,6 +100,8 @@ class TokenSettings(aigpy.model.ModelBase):
     accessToken = None
     refreshToken = None
     expiresAfter = 0
+    sessionId = None
+    deviceId = None
 
     def __encode__(self, string):
         sw = bytes(string, 'utf-8')

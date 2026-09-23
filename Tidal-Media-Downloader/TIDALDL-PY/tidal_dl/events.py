@@ -256,6 +256,8 @@ def loginByWeb():
             TOKEN.accessToken = TIDAL_API.key.accessToken
             TOKEN.refreshToken = TIDAL_API.key.refreshToken
             TOKEN.expiresAfter = time.time() + int(TIDAL_API.key.expiresIn)
+            TOKEN.sessionId = TIDAL_API.key.sessionId
+            TOKEN.deviceId = TIDAL_API.key.deviceId
             TOKEN.save()
             return True
 
@@ -277,6 +279,15 @@ def loginByConfig():
             TIDAL_API.key.countryCode = TOKEN.countryCode
             TIDAL_API.key.userId = TOKEN.userid
             TIDAL_API.key.accessToken = TOKEN.accessToken
+            TIDAL_API.key.sessionId = TOKEN.sessionId
+            TIDAL_API.key.deviceId = TOKEN.deviceId
+            
+            # If no session ID in config, try to get one
+            if not TIDAL_API.key.sessionId:
+                TIDAL_API.loginByAccessToken(TOKEN.accessToken)
+                TOKEN.sessionId = TIDAL_API.key.sessionId
+                TOKEN.deviceId = TIDAL_API.key.deviceId
+                TOKEN.save()
             return True
 
         Printf.info(LANG.select.MSG_INVALID_ACCESSTOKEN)
@@ -288,6 +299,8 @@ def loginByConfig():
             TOKEN.countryCode = TIDAL_API.key.countryCode
             TOKEN.accessToken = TIDAL_API.key.accessToken
             TOKEN.expiresAfter = time.time() + int(TIDAL_API.key.expiresIn)
+            TOKEN.sessionId = TIDAL_API.key.sessionId
+            TOKEN.deviceId = TIDAL_API.key.deviceId
             TOKEN.save()
             return True
         else:
@@ -317,4 +330,6 @@ def loginByAccessToken():
     TOKEN.refreshToken = refreshToken
     TOKEN.expiresAfter = 0
     TOKEN.countryCode = TIDAL_API.key.countryCode
+    TOKEN.sessionId = TIDAL_API.key.sessionId
+    TOKEN.deviceId = TIDAL_API.key.deviceId
     TOKEN.save()

@@ -11,10 +11,15 @@
 import random
 import re
 import time
+import json
+import base64
+import logging
+import uuid
 from typing import List
 from xml.etree import ElementTree
 
 import requests
+import aigpy
 
 from model import *
 from settings import *
@@ -27,102 +32,86 @@ requests.adapters.DEFAULT_RETRIES = 5
 class TidalAPI(object):
     def __init__(self):
         self.key = LoginKey()
-        self.apiKey = {'clientId': '7m7Ap0JC9j1cOM3n',
-                       'clientSecret': 'vRAdA108tlvkJpTsGZS8rGZ7xTlbJ0qaZ2K9saEzsgY='}
+        self.apiKey = {'clientId': 'OmDtrzFgyVVL6uW56OnFA2COiabqm',
+                       'clientSecret': 'zxen1r3pO0hgtOC7j6twMo9UAqngGrmRiWpV7QC1zJ8='}
+        self.session = requests.Session()
+        self.user_agent = "TIDAL_ANDROID/2.87.1"
 
-    def __get__(self, path, params={}, urlpre='https://api.tidalhifi.com/v1/'):
-        header = {}
-        header = {'authorization': f'Bearer {self.key.accessToken}'}
-        params['countryCode'] = self.key.countryCode
-        errmsg = "Get operation err!"
+    def __handle_response__(self, response, method, path):
+        if response.status_code == 200:
+            return response.json()
+        
+        # Handle DataDome / WAF logic
+        if response.status_code == 403:
+            logging.error(f"Access Denied (403) at {path}. Heuristics block detected.")
+            try:
+                data = response.json()
+                if "cookie" in data:
+                    logging.warning("Found DataDome cookie in 403 response. Injecting.")
+                    self.session.cookies.set("datadome", data["cookie"])
+                    return {"status": 403, "sub_status": 0, "userMessage": "WAF Interception - Cookie updated"}
+            except:
+                pass
+            return {"status": 403, "sub_status": 0, "userMessage": "Access Denied (WAF Block)"}
+
+        if response.status_code == 401:
+            try: return response.json()
+            except: return {"status": 401, "sub_status": 0, "userMessage": "Unauthorized"}
+
+        try: return response.json()
+        except: raise Exception(f"Non-JSON response ({response.status_code}) from {path}: {response.text[:200]}")
+
+    def __get__(self, path, params=None, urlpre='https://api.tidal.com/v1/'):
+        if params is None: params = {}
+        headers = {
+            'Authorization': f'Bearer {self.key.accessToken}',
+            'User-Agent': self.user_agent,
+            'Accept': 'application/json',
+            'X-Tidal-Token': self.apiKey['clientId']
+        }
+        if self.key.sessionId: headers['X-Tidal-SessionId'] = self.key.sessionId
+        if self.key.countryCode: params['countryCode'] = self.key.countryCode
+            
         for index in range(0, 3):
             try:
-                respond = requests.get(urlpre + path, headers=header, params=params)
-                if respond.url.find("playbackinfopostpaywall") != -1 and SETTINGS.downloadDelay is not False:
-                    # random sleep between 0.5 and 5 seconds and print it
-                    sleep_time = random.randint(500, 5000) / 1000
-                    print(
-                        f"Sleeping for {sleep_time} seconds, to mimic human behaviour and prevent too many requests error")
-                    time.sleep(sleep_time)
-
-                if respond.status_code == 429:
-                    print('Too many requests, waiting for 20 seconds...')
-                    # Loop countdown 20 seconds and print the remaining time
-                    for i in range(20, 0, -1):
-                        time.sleep(1)
-                        print(i, end=' ')
-                    print('')
-                    continue
-
-                result = json.loads(respond.text)
-                if 'status' not in result:
-                    return result
-
-                if 'userMessage' in result and result['userMessage'] is not None:
-                    errmsg += result['userMessage']
+                respond = self.session.get(urlpre + path, headers=headers, params=params, verify=False, timeout=15)
+                if respond.status_code == 401:
+                    try:
+                        result = respond.json()
+                        if result.get('subStatus') == 6001 and index == 0:
+                            self.loginByAccessToken(self.key.accessToken)
+                            if self.key.sessionId:
+                                headers['X-Tidal-SessionId'] = self.key.sessionId
+                                continue
+                    except: pass
+                    raise Exception("User does not have a valid session")
+                
+                result = self.__handle_response__(respond, "GET", path)
+                if 'status' not in result: return result
                 break
             except Exception as e:
-                if index >= 3:
-                    errmsg += respond.text
-
-        raise Exception(errmsg)
-
-    def __getItems__(self, path, params={}):
-        params['limit'] = 50
-        params['offset'] = 0
-        total = 0
-        ret = []
-        while True:
-            data = self.__get__(path, params)
-            if 'totalNumberOfItems' in data:
-                total = data['totalNumberOfItems']
-            if total > 0 and total <= len(ret):
-                return ret
-
-            ret += data["items"]
-            num = len(data["items"])
-            if num < 50:
-                break
-            params['offset'] += num
-        return ret
-
-    def __getResolutionList__(self, url):
-        ret = []
-        txt = requests.get(url).content.decode('utf-8')
-        # array = txt.split("#EXT-X-STREAM-INF")
-        array = txt.split("#")
-        for item in array:
-            if "RESOLUTION=" not in item:
-                continue
-            if "EXT-X-STREAM-INF:" not in item:
-                continue
-            stream = VideoStreamUrl()
-            stream.codec = aigpy.string.getSub(item, "CODECS=\"", "\"")
-            stream.m3u8Url = "http" + aigpy.string.getSubOnlyStart(item, "http").strip()
-            stream.resolution = aigpy.string.getSub(item, "RESOLUTION=", "http").strip()
-            stream.resolution = stream.resolution.split(',')[0]
-            stream.resolutions = stream.resolution.split("x")
-            ret.append(stream)
-        return ret
+                if index >= 2: raise e
+        return result
 
     def __post__(self, path, data, auth=None, urlpre='https://auth.tidal.com/v1/oauth2'):
         for index in range(3):
             try:
-                result = requests.post(urlpre + path, data=data, auth=auth, verify=False).json()
+                # For auth requests, use requests.post directly to avoid session header issues
+                # and match tiddl's working implementation
+                respond = requests.post(urlpre + path, data=data, auth=auth, verify=False, timeout=15)
+                result = self.__handle_response__(respond, "POST", path)
+                if result.get("status") == 403 and "Cookie updated" in result.get("userMessage", ""):
+                    continue
                 return result
             except Exception as e:
-                if index == 2:
-                    raise e
+                if index == 2: raise e
+                time.sleep(2)
 
     def getDeviceCode(self) -> str:
-        data = {
-            'client_id': self.apiKey['clientId'],
-            'scope': 'r_usr+w_usr+w_sub'
-        }
+        data = {'client_id': self.apiKey['clientId'], 'scope': 'r_usr+w_usr+w_sub'}
         result = self.__post__('/device_authorization', data)
-        if 'status' in result and result['status'] != 200:
-            raise Exception("Device authorization failed. Please choose another apikey.")
-
+        if result.get('status') and result['status'] != 200:
+            raise Exception(f"Device authorization failed: {result.get('userMessage', 'Unknown error')}")
         self.key.deviceCode = result['deviceCode']
         self.key.userCode = result['userCode']
         self.key.verificationUrl = result['verificationUri']
@@ -139,26 +128,15 @@ class TidalAPI(object):
         }
         auth = (self.apiKey['clientId'], self.apiKey['clientSecret'])
         result = self.__post__('/token', data, auth)
-        if 'status' in result and result['status'] != 200:
-            if result['status'] == 400 and result['sub_status'] == 1002:
-                return False
-            else:
-                raise Exception("Error while checking for authorization. Trying again...")
-
-        # if auth is successful:
+        if result.get('status') and result['status'] != 200:
+            return False
         self.key.userId = result['user']['userId']
         self.key.countryCode = result['user']['countryCode']
         self.key.accessToken = result['access_token']
         self.key.refreshToken = result['refresh_token']
         self.key.expiresIn = result['expires_in']
-        return True
-
-    def verifyAccessToken(self, accessToken) -> bool:
-        header = {'authorization': 'Bearer {}'.format(accessToken)}
-        result = requests.get('https://api.tidal.com/v1/sessions', headers=header).json()
-
-        if 'status' in result and result['status'] != 200:
-            return False
+        try: self.loginByAccessToken(self.key.accessToken)
+        except: pass
         return True
 
     def refreshAccessToken(self, refreshToken) -> bool:
@@ -170,318 +148,126 @@ class TidalAPI(object):
         }
         auth = (self.apiKey['clientId'], self.apiKey['clientSecret'])
         result = self.__post__('/token', data, auth)
-        if 'status' in result and result['status'] != 200:
-            return False
-
-        # if auth is successful:
+        if result.get('status') and result['status'] != 200: return False
         self.key.userId = result['user']['userId']
         self.key.countryCode = result['user']['countryCode']
         self.key.accessToken = result['access_token']
         self.key.expiresIn = result['expires_in']
+        self.loginByAccessToken(self.key.accessToken)
         return True
 
     def loginByAccessToken(self, accessToken, userid=None):
-        header = {'authorization': 'Bearer {}'.format(accessToken)}
-        result = requests.get('https://api.tidal.com/v1/sessions', headers=header).json()
-        if 'status' in result and result['status'] != 200:
-            raise Exception("Login failed!")
+        if not self.key.deviceId: self.key.deviceId = str(uuid.uuid4()).replace('-', '')[:16]
+        urls = ['https://api.tidal.com/v1/sessions', 'https://api.tidalhifi.com/v1/sessions']
+        final_res = None
+        for url in urls:
+            strats = [
+                {"headers": {'Authorization': f'Bearer {accessToken}', 'X-Tidal-Token': self.apiKey['clientId'], 'User-Agent': self.user_agent, 'Accept': 'application/json'}, "params": {}},
+                {"headers": {'Authorization': f'Bearer {accessToken}', 'User-Agent': self.user_agent, 'Accept': 'application/json'}, "params": {'deviceId': self.key.deviceId}}
+            ]
+            for strat in strats:
+                try:
+                    r = self.session.get(url, headers=strat['headers'], params=strat['params'], verify=False, timeout=10)
+                    if r.status_code == 200:
+                        final_res = r
+                        break
+                except: continue
+            if final_res: break
+        if not final_res: raise Exception("User does not have a valid session")
+        result = final_res.json()
+        self.key.userId, self.key.countryCode, self.key.accessToken, self.key.sessionId = result['userId'], result['countryCode'], accessToken, result['sessionId']
 
-        if not aigpy.string.isNull(userid):
-            if str(result['userId']) != str(userid):
-                raise Exception("User mismatch! Please use your own accesstoken.", )
-
-        self.key.userId = result['userId']
-        self.key.countryCode = result['countryCode']
-        self.key.accessToken = accessToken
-
-        return
-
-    def getAlbum(self, id) -> Album:
-        return aigpy.model.dictToModel(self.__get__('albums/' + str(id)), Album())
-
-    def getPlaylist(self, id) -> Playlist:
-        return aigpy.model.dictToModel(self.__get__('playlists/' + str(id)), Playlist())
-    
+    def getAlbum(self, id) -> Album: return aigpy.model.dictToModel(self.__get__('albums/' + str(id)), Album())
+    def getPlaylist(self, id) -> Playlist: return aigpy.model.dictToModel(self.__get__('playlists/' + str(id)), Playlist())
     def getPlaylistSelf(self) -> List[Playlist]:
         ret = self.__get__(f'users/{self.key.userId}/playlists')
-        playlists = []
-        for item in ret['items']:
-            playlists.append(aigpy.model.dictToModel(item, Playlist()))
-        return playlists
-
-    def getArtist(self, id) -> Artist:
-        return aigpy.model.dictToModel(self.__get__('artists/' + str(id)), Artist())
-
-    def getTrack(self, id) -> Track:
-        return aigpy.model.dictToModel(self.__get__('tracks/' + str(id)), Track())
-
-    def getVideo(self, id) -> Video:
-        return aigpy.model.dictToModel(self.__get__('videos/' + str(id)), Video())
-
+        return [aigpy.model.dictToModel(item, Playlist()) for item in ret['items']]
+    def getArtist(self, id) -> Artist: return aigpy.model.dictToModel(self.__get__('artists/' + str(id)), Artist())
+    def getTrack(self, id) -> Track: return aigpy.model.dictToModel(self.__get__('tracks/' + str(id)), Track())
+    def getVideo(self, id) -> Video: return aigpy.model.dictToModel(self.__get__('videos/' + str(id)), Video())
     def getMix(self, id) -> Mix:
-        mix = Mix()
-        mix.id = id
-        mix.tracks, mix.videos = self.getItems(id, Type.Mix)
+        mix = Mix(); mix.id = id; mix.tracks, mix.videos = self.getItems(id, Type.Mix)
         return None, mix
-
     def getTypeData(self, id, type: Type):
-        if type == Type.Album:
-            return self.getAlbum(id)
-        if type == Type.Artist:
-            return self.getArtist(id)
-        if type == Type.Track:
-            return self.getTrack(id)
-        if type == Type.Video:
-            return self.getVideo(id)
-        if type == Type.Playlist:
-            return self.getPlaylist(id)
-        if type == Type.Mix:
-            return self.getMix(id)
-        return None
-
+        mapping = {Type.Album: self.getAlbum, Type.Artist: self.getArtist, Type.Track: self.getTrack, Type.Video: self.getVideo, Type.Playlist: self.getPlaylist, Type.Mix: self.getMix}
+        return mapping[type](id) if type in mapping else None
     def search(self, text: str, type: Type, offset: int = 0, limit: int = 10) -> SearchResult:
-        typeStr = type.name.upper() + "S"
-
-        if type == Type.Null:
-            typeStr = "ARTISTS,ALBUMS,TRACKS,VIDEOS,PLAYLISTS"
-
-        params = {"query": text,
-                  "offset": offset,
-                  "limit": limit,
-                  "types": typeStr}
+        typeStr = type.name.upper() + "S" if type != Type.Null else "ARTISTS,ALBUMS,TRACKS,VIDEOS,PLAYLISTS"
+        params = {"query": text, "offset": offset, "limit": limit, "types": typeStr}
         return aigpy.model.dictToModel(self.__get__('search', params=params), SearchResult())
-
-    def getSearchResultItems(self, result: SearchResult, type: Type):
-        if type == Type.Track:
-            return result.tracks.items
-        if type == Type.Video:
-            return result.videos.items
-        if type == Type.Album:
-            return result.albums.items
-        if type == Type.Artist:
-            return result.artists.items
-        if type == Type.Playlist:
-            return result.playlists.items
-        return []
-
-    def getLyrics(self, id) -> Lyrics:
-        data = self.__get__(f'tracks/{str(id)}/lyrics', urlpre='https://listen.tidal.com/v1/')
-        return aigpy.model.dictToModel(data, Lyrics())
-
     def getItems(self, id, type: Type):
-        if type == Type.Playlist:
-            data = self.__getItems__('playlists/' + str(id) + "/items")
-        elif type == Type.Album:
-            data = self.__getItems__('albums/' + str(id) + "/items")
-        elif type == Type.Mix:
-            data = self.__getItems__('mixes/' + str(id) + '/items')
-        else:
-            raise Exception("invalid Type!")
-
-        tracks = []
-        videos = []
+        path_map = {Type.Playlist: f'playlists/{id}/items', Type.Album: f'albums/{id}/items', Type.Mix: f'mixes/{id}/items'}
+        if type not in path_map: raise Exception("invalid Type!")
+        data = self.__getItems__(path_map[type]); tracks, videos = [], []
         for item in data:
-            if item['type'] == 'track' and item['item']['streamReady']:
-                tracks.append(aigpy.model.dictToModel(item['item'], Track()))
-            else:
-                videos.append(aigpy.model.dictToModel(item['item'], Video()))
+            model, target = (Track(), tracks) if item['type'] == 'track' else (Video(), videos)
+            if item['item'].get('streamReady'): target.append(aigpy.model.dictToModel(item['item'], model))
         return tracks, videos
-
-    def getArtistAlbums(self, id, includeEP=False):
-        data = self.__getItems__(f'artists/{str(id)}/albums')
-        albums = list(aigpy.model.dictToModel(item, Album()) for item in data)
-        if not includeEP:
-            return albums
-
-        data = self.__getItems__(f'artists/{str(id)}/albums', {"filter": "EPSANDSINGLES"})
-        albums += list(aigpy.model.dictToModel(item, Album()) for item in data)
-        return albums
-
-    # from https://github.com/Dniel97/orpheusdl-tidal/blob/master/interface.py#L582
-    def parse_mpd(self, xml: bytes) -> list:
-        # Removes default namespace definition, don't do that!
-        xml = re.sub(r'xmlns="[^"]+"', '', xml, count=1)
-        root = ElementTree.fromstring(xml)
-
-        # List of AudioTracks
-        tracks = []
-
-        for period in root.findall('Period'):
-            for adaptation_set in period.findall('AdaptationSet'):
-                for rep in adaptation_set.findall('Representation'):
-                    # Check if representation is audio
-                    content_type = adaptation_set.get('contentType')
-                    if content_type != 'audio':
-                        raise ValueError('Only supports audio MPDs!')
-
-                    # Codec checks
-                    codec = rep.get('codecs').upper()
-                    if codec.startswith('MP4A'):
-                        codec = 'AAC'
-
-                    # Segment template
-                    seg_template = rep.find('SegmentTemplate')
-                    # Add init file to track_urls
-                    track_urls = [seg_template.get('initialization')]
-                    start_number = int(seg_template.get('startNumber') or 1)
-
-                    # https://dashif-documents.azurewebsites.net/Guidelines-TimingModel/master/Guidelines-TimingModel.html#addressing-explicit
-                    # Also see example 9
-                    seg_timeline = seg_template.find('SegmentTimeline')
-                    if seg_timeline is not None:
-                        seg_time_list = []
-                        cur_time = 0
-
-                        for s in seg_timeline.findall('S'):
-                            # Media segments start time
-                            if s.get('t'):
-                                cur_time = int(s.get('t'))
-
-                            # Segment reference
-                            for i in range((int(s.get('r') or 0) + 1)):
-                                seg_time_list.append(cur_time)
-                                # Add duration to current time
-                                cur_time += int(s.get('d'))
-
-                        # Create list with $Number$ indices
-                        seg_num_list = list(range(start_number, len(seg_time_list) + start_number))
-                        # Replace $Number$ with all the seg_num_list indices
-                        track_urls += [seg_template.get('media').replace('$Number$', str(n)) for n in seg_num_list]
-
-                    tracks.append(track_urls)
-        return tracks
-
+    def __getItems__(self, path, params=None):
+        params = (params or {}).copy(); params.update({'limit': 50, 'offset': 0}); ret = []
+        while True:
+            data = self.__get__(path, params); total = data.get('totalNumberOfItems', 0); ret += data["items"]
+            if total > 0 and total <= len(ret) or len(data["items"]) < 50: return ret
+            params['offset'] += len(data["items"])
     def getStreamUrl(self, id, quality: AudioQuality):
-        squality = "HI_RES"
-        if quality == AudioQuality.Normal:
-            squality = "LOW"
-        elif quality == AudioQuality.High:
-            squality = "HIGH"
-        elif quality == AudioQuality.HiFi:
-            squality = "LOSSLESS"
-        elif quality == AudioQuality.Max:
-            squality = "HI_RES_LOSSLESS"
-
-        paras = {"audioquality": squality, "playbackmode": "STREAM", "assetpresentation": "FULL"}
-        data = self.__get__(f'tracks/{str(id)}/playbackinfopostpaywall', paras)
-        resp = aigpy.model.dictToModel(data, StreamRespond())
-
+        qual_map = {
+            AudioQuality.Max: "HI_RES_LOSSLESS",
+            AudioQuality.Master: "HI_RES_LOSSLESS",
+            AudioQuality.HiFi: "LOSSLESS",
+            AudioQuality.High: "HIGH",
+            AudioQuality.Normal: "LOW"
+        }
+        paras = {"audioquality": qual_map.get(quality, "LOW"), "playbackmode": "STREAM", "assetpresentation": "FULL"}
+        resp = aigpy.model.dictToModel(self.__get__(f'tracks/{str(id)}/playbackinfopostpaywall', paras), StreamRespond())
+        ret = StreamUrl(); ret.trackid, ret.soundQuality = resp.trackid, resp.audioQuality
         if "vnd.tidal.bt" in resp.manifestMimeType:
             manifest = json.loads(base64.b64decode(resp.manifest).decode('utf-8'))
-            ret = StreamUrl()
-            ret.trackid = resp.trackid
-            ret.soundQuality = resp.audioQuality
-            ret.codec = manifest['codecs']
-            ret.encryptionKey = manifest['keyId'] if 'keyId' in manifest else ""
-            ret.url = manifest['urls'][0]
-            ret.urls = [ret.url]
-            return ret
+            ret.codec, ret.encryptionKey, ret.url = manifest['codecs'], manifest.get('keyId', ""), manifest['urls'][0]; ret.urls = [ret.url]
         elif "dash+xml" in resp.manifestMimeType:
-            xmldata = base64.b64decode(resp.manifest).decode('utf-8')
-            ret = StreamUrl()
-            ret.trackid = resp.trackid
-            ret.soundQuality = resp.audioQuality
-            ret.codec = aigpy.string.getSub(xmldata, 'codecs="', '"')
-            ret.encryptionKey = ""  # manifest['keyId'] if 'keyId' in manifest else ""
-            ret.urls = self.parse_mpd(xmldata)[0]
-            if len(ret.urls) > 0:
-                ret.url = ret.urls[0]
-            return ret
+            xmldata = base64.b64decode(resp.manifest).decode('utf-8'); ret.codec, ret.encryptionKey = aigpy.string.getSub(xmldata, 'codecs="', '"'), ""; ret.urls = self.parse_mpd(xmldata)[0]
+            if ret.urls: ret.url = ret.urls[0]
+        return ret
+    def parse_mpd(self, xml: bytes) -> list:
+        xml = re.sub(r'xmlns="[^"]+"', '', xml.decode() if isinstance(xml, bytes) else xml, count=1); root = ElementTree.fromstring(xml); tracks = []
+        for rep in root.findall('.//Representation'):
+            seg = rep.find('SegmentTemplate'); urls = [seg.get('initialization')]
+            if seg.find('SegmentTimeline') is not None:
+                cur = 0
+                for s in seg.findall('.//S'):
+                    if s.get('t'): cur = int(s.get('t'))
+                    for _ in range(int(s.get('r') or 0) + 1): urls.append(seg.get('media').replace('$Number$', str(len(urls)))); cur += int(s.get('d'))
+            tracks.append(urls)
+        return tracks
 
-        raise Exception("Can't get the streamUrl, type is " + resp.manifestMimeType)
-
-    def getVideoStreamUrl(self, id, quality: VideoQuality):
-        paras = {"videoquality": "HIGH", "playbackmode": "STREAM", "assetpresentation": "FULL"}
-        data = self.__get__(f'videos/{str(id)}/playbackinfopostpaywall', paras)
-        resp = aigpy.model.dictToModel(data, StreamRespond())
-
-        if "vnd.tidal.emu" in resp.manifestMimeType:
-            manifest = json.loads(base64.b64decode(resp.manifest).decode('utf-8'))
-            array = self.__getResolutionList__(manifest['urls'][0])
-            icmp = int(quality.value)
-            index = 0
-            for item in array:
-                if icmp <= int(item.resolutions[1]):
-                    break
-                index += 1
-            if index >= len(array):
-                index = len(array) - 1
-            return array[index]
-        raise Exception("Can't get the streamUrl, type is " + resp.manifestMimeType)
-
-    def getTrackContributors(self, id):
-        return self.__get__(f'tracks/{str(id)}/contributors')
-
-    def getCoverUrl(self, sid, width="320", height="320"):
-        if sid is None:
-            return ""
-        return f"https://resources.tidal.com/images/{sid.replace('-', '/')}/{width}x{height}.jpg"
-
+    def getTrackContributors(self, id): return self.__get__(f'tracks/{str(id)}/contributors')
+    def getCoverUrl(self, sid, width="320", height="320"): return f"https://resources.tidal.com/images/{sid.replace('-', '/')}/{width}x{height}.jpg" if sid else ""
     def getCoverData(self, sid, width="320", height="320"):
-        url = self.getCoverUrl(sid, width, height)
-        try:
-            return requests.get(url).content
-        except:
-            return ''
-
-    def getArtistsName(self, artists=[]):
-        array = list(item.name for item in artists)
-        return ", ".join(array)
-
+        try: return requests.get(self.getCoverUrl(sid, width, height)).content
+        except: return ''
+    def getArtistsName(self, artists=[]): return ", ".join(list(item.name for item in artists))
     def getFlag(self, data, type: Type, short=True, separator=" / "):
-        master = False
-        atmos = False
-        explicit = False
+        master = False; atmos = False; explicit = False
         if type == Type.Album or type == Type.Track:
-            if data.audioQuality == "HI_RES":
-                master = True
-            if type == Type.Album and "DOLBY_ATMOS" in data.audioModes:
-                atmos = True
-            if data.explicit is True:
-                explicit = True
-        if type == Type.Video:
-            if data.explicit is True:
-                explicit = True
-        if not master and not atmos and not explicit:
-            return ""
+            if data.audioQuality == "HI_RES": master = True
+            if type == Type.Album and data.audioModes and "DOLBY_ATMOS" in data.audioModes: atmos = True
+            if data.explicit is True: explicit = True
+        if type == Type.Video and data.explicit is True: explicit = True
+        if not master and not atmos and not explicit: return ""
         array = []
-        if master:
-            array.append("M" if short else "Master")
-        if atmos:
-            array.append("A" if short else "Dolby Atmos")
-        if explicit:
-            array.append("E" if short else "Explicit")
+        if master: array.append("M" if short else "Master")
+        if atmos: array.append("A" if short else "Dolby Atmos")
+        if explicit: array.append("E" if short else "Explicit")
         return separator.join(array)
 
+    def getLyrics(self, id) -> Lyrics:
+        data = self.__get__(f'tracks/{str(id)}/lyrics')
+        return aigpy.model.dictToModel(data, Lyrics())
+
     def parseUrl(self, url):
-        if "tidal.com" not in url:
-            return Type.Null, url
-
-        url = url.lower()
-        for index, item in enumerate(Type):
-            if item.name.lower() in url:
-                etype = item
-                return etype, aigpy.string.getSub(url, etype.name.lower() + '/', '/')
+        if "tidal.com" not in url: return Type.Null, url
+        for item in Type:
+            if item.name.lower() in url.lower(): sid = aigpy.string.getSub(url.lower(), item.name.lower() + '/', '/'); return item, (sid.split('?')[0] if '?' in sid else sid)
         return Type.Null, url
-
-    def getByString(self, string):
-        if aigpy.string.isNull(string):
-            raise Exception("Please enter something.")
-
-        obj = None
-        etype, sid = self.parseUrl(string)
-        for index, item in enumerate(Type):
-            if etype != Type.Null and etype != item:
-                continue
-            if item == Type.Null:
-                continue
-            try:
-                obj = self.getTypeData(sid, item)
-                return item, obj
-            except:
-                continue
-
-        raise Exception("No result.")
 
 # Singleton
 TIDAL_API = TidalAPI()

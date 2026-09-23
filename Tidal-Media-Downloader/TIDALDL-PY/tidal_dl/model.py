@@ -192,6 +192,8 @@ class LoginKey(aigpy.model.ModelBase):
         self.accessToken = None
         self.refreshToken = None
         self.expiresIn = None
+        self.sessionId = None
+        self.deviceId = None
 
 
 class StreamRespond(aigpy.model.ModelBase):

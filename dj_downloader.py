@@ -23,7 +23,7 @@ except ImportError as e:
     sys.exit(1)
 
 def setup_logging():
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def main():
     setup_logging()
@@ -35,16 +35,34 @@ def main():
         TOKEN.read(getTokenPath())
         
         # Set API Key
+        # Index 5 (Tiddl) is currently the only one working reliably in 2026
+        if SETTINGS.apiKeyIndex != 5:
+            SETTINGS.apiKeyIndex = 5
+            SETTINGS.save()
+            
         TIDAL_API.apiKey = apiKey.getItem(SETTINGS.apiKeyIndex)
+        print(f"Using API Key: {TIDAL_API.apiKey['platform']} (Index: {SETTINGS.apiKeyIndex})")
         
         # Robust Login (from tidal-dl logic)
-        if not apiKey.isItemValid(SETTINGS.apiKeyIndex):
-            print("Current API Key is invalid. Please select a valid one.")
-            changeApiKey()
-            loginByWeb()
-        elif not loginByConfig():
-            print("Login expired or missing. Starting web login...")
-            loginByWeb()
+        login_success = False
+        if apiKey.isItemValid(SETTINGS.apiKeyIndex):
+            if loginByConfig():
+                login_success = True
+            else:
+                print("Login expired or missing. Starting web login...")
+                if loginByWeb():
+                    login_success = True
+        
+        if not login_success:
+            print("Login failed with current key. Trying Index 4 (Android Auto) as fallback...")
+            SETTINGS.apiKeyIndex = 4
+            TIDAL_API.apiKey = apiKey.getItem(4)
+            if loginByWeb():
+                login_success = True
+                SETTINGS.save() # Save the working index
+            else:
+                print("Web login failed again. Exiting.")
+                return
         
         # FORCE MASTER QUALITY for highest quality source before conversion
         SETTINGS.audioQuality = AudioQuality.Master

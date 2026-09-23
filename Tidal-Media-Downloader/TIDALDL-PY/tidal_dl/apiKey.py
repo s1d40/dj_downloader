@@ -54,6 +54,14 @@ __KEYS_JSON__ = '''
             "clientSecret": "VJKhDFqJPqvsPVNBV6ukXTJmwlvbttP7wlMlrc72se4=",
             "valid": "True",
             "from": "1nikolas (https://github.com/yaronzz/Tidal-Media-Downloader/pull/840)"
+        },
+        {
+            "platform": "Tiddl (Working 2026)",
+            "formats": "Normal/High/HiFi/Master",
+            "clientId": "fX2JxdmntZWK0ixT",
+            "clientSecret": "1Nn9AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg=",
+            "valid": "True",
+            "from": "tiddl library"
         }
     ]
 }
@@ -64,8 +72,8 @@ __ERROR_KEY__ = {
     'formats': '',
     'clientId': '',
     'clientSecret': '',
-                    'valid': 'False',
-},
+    'valid': 'False',
+}
 
 
 def getNum():
@@ -98,11 +106,11 @@ def getVersion():
     return __API_KEYS__['version']
 
 
-# Load from gist
-try:
-    respond = requests.get('https://api.github.com/gists/48d01f5a24b4b7b37f19443977c22cd6')
-    if respond.status_code == 200:
-        content = respond.json()['files']['tidal-api-key.json']['content']
-        __API_KEYS__ = json.loads(content)
-except:
-    pass
+# Load from gist - Disabled to prevent overriding our fix
+# try:
+#     respond = requests.get('https://api.github.com/gists/48d01f5a24b4b7b37f19443977c22cd6')
+#     if respond.status_code == 200:
+#         content = respond.json()['files']['tidal-api-key.json']['content']
+#         __API_KEYS__ = json.loads(content)
+# except:
+#     pass
